@@ -1,5 +1,5 @@
 #### IMPORTANT: REPLACE WITH YOUR 8-DIGIT STUDENT ID NUMBER ####
 # e.g. STUDENT_ID = '10045678'
-STUDENT_ID = 'your_student_id_here'
+STUDENT_ID = 'd06489tk'
 
 ########## DO NOT OTHERWISE MODIFY THIS FILE ##########
