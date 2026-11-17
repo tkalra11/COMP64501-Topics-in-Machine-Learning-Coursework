@@ -9,23 +9,72 @@ class Net(nn.Module):
     This simple example is a feedforward neural network with one hidden layer.
     Please note that this example model has 101,770 parameters, which is over the 100,000 limit.
     """
-    def __init__(self, input_size=28*28, hidden_size=128, num_classes=10):
+    def __init__(self, inputs = 1 , first_residual = 24 , first_transition =  44, second_transition = 64 , flatten = 32 , num_classes = 10):
         super(Net, self).__init__()
 
-        # We define the layers of our model here by instantiating layer objects.
-        # Here we define two fully connected (linear) layers.
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, num_classes)
+        # ResNET like structure with skip connections
+        
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels = inputs , out_channels = first_residual , kernel_size = 3 , padding = 1 , bias = False),
+            nn.BatchNorm2d(first_residual),
+            nn.ReLU(inplace = True)
+        )
 
-        # nn.init module contains initialization methods:
-        # https://docs.pytorch.org/docs/main/nn.init.html
-        # This particular one is called Kaiming initialization (also known as
-        # He initialization) described in He, K. et al. (2015)
-        nn.init.kaiming_normal_(self.fc1.weight)
+        # Residual Stage 1: (24, 28, 28) -> Residual -> MaxPool -> (24, 14, 14)
+        self.res1 = nn.Sequential(
+            nn.Conv2d(first_residual , first_residual , kernel_size = 3, padding = 1 , bias = False),
+            nn.BatchNorm2d(first_residual),
+            nn.ReLU(inplace = True),
+            nn.Conv2d(first_residual , first_residual , kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(24)
+        )
+        self.pool1 = nn.Sequential(
+            nn.ReLU(inplace = True),
+            nn.MaxPool2d(kernel_size = 2 , stride = 2)
+        )
+
+        # Transition + Residual Stage 2: (24, 14, 14) -> (44, 7, 7)
+        self.trans2 = nn.Sequential(
+            nn.Conv2d(first_residual , first_transition , kernel_size = 3 , padding = 1 , bias = False),
+            nn.BatchNorm2d(first_transition),
+            nn.ReLU(inplace = True),
+            nn.MaxPool2d(kernel_size = 2, stride = 2)
+        )
+        self.res2 = nn.Sequential(
+            nn.Conv2d(first_transition , first_transition , kernel_size = 3 , padding = 1 , bias = False),
+            nn.BatchNorm2d(first_transition),
+            nn.ReLU(inplace = True),
+            nn.Conv2d(first_transition , first_transition , kernel_size = 3 , padding = 1 , bias = False),
+            nn.BatchNorm2d(first_transition)
+        )
+
+        # Transition + Residual Stage 3: (44, 7, 7) -> (64, 3, 3)
+        self.trans3 = nn.Sequential(
+            nn.Conv2d(first_transition , second_transition , kernel_size = 3 , padding = 1 , bias = False),
+            nn.BatchNorm2d(second_transition),
+            nn.ReLU(inplace=True)
+        )
+
+        # Classifier: (64, 3, 3) -> 576 -> 32 -> 10
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(second_transition * 3 * 3, flatten),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.25),
+            nn.Linear(flatten , num_classes)
+        )
 
     def forward(self, x):
-        # The forward pass defines the connectivity of the layers defined in __init__.
-        x = x.view(x.size(0), -1)  # flatten the input tensor (first dimension is batch size)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+        # Stage 1 with skip connection: x + res1(x)
+        x = self.stem(x)
+        x = self.pool1(x + self.res1(x))
+
+        # Stage 2 with skip connection: x + res2(x)
+        x = self.trans2(x)
+        x = torch.relu(x + self.res2(x))
+
+        # Stage 3 + Classifier
+        x = self.pool3(self.trans3(x))
+        logits = self.classifier(x)
+        return logits

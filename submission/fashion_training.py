@@ -8,6 +8,7 @@ and execute: uv run -m submission.fashion_training
 """
 import os
 import torch, torchvision
+import torchvision.transforms as T
 
 from submission import engine
 from submission.fashion_model import Net
@@ -62,10 +63,21 @@ def train_fashion_model(fashion_mnist,
     model.to(device)
     criterion = torch.nn.CrossEntropyLoss()
     criterion.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # Added weight decay and scheduler to cut learning rate in half when accuracy plateaus
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate , weight_decay = 1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=3
+    )
 
     # Training loop
     train_losses, val_losses, val_accuracies = [], [], []
+
+    # Initializing variables to track the best accuracies and for early stopping when accuracies plateau for 7 epochs
+    best_val_acc = -1.0
+    best_weights = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    cutoff = 7
+    no_improvement = 0
+
     for epoch in range(n_epochs):
         train_loss = engine.train(model, train_loader, criterion, optimizer, device)
         print(f"Epoch [{epoch + 1}/{n_epochs}], Training Loss: {train_loss:.4f}")
@@ -74,6 +86,22 @@ def train_fashion_model(fashion_mnist,
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         val_accuracies.append(accuracy)
+        scheduler.step(accuracy)
+
+        # check if accuracy improves otherwise we get closer to cutoff for early stopping
+        if accuracy > best_val_acc:
+            best_val_acc = accuracy
+            best_weights = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            no_improvement = 0
+        else:
+            no_improvement += 1
+            if no_improvement >= cutoff:
+                print(f"Early stopping triggered at epoch {epoch + 1} (Best Val Acc: {best_val_acc:.4f})")
+                break
+
+    # Restore best weights into the model and move to CPU
+    model.load_state_dict(best_weights)
+    model.cpu()
 
     # Return the model's state_dict (weights) - DO NOT CHANGE THIS
     if return_state_dict_only:
@@ -91,8 +119,14 @@ def get_transforms(mode='train'):
     Pad, Resize or CenterCrop there.
     """
     if mode == 'train':
-        tfs = torchvision.transforms.Compose([
-            torchvision.transforms.ToTensor(), # convert images to tensors
+        tfs = T.Compose([
+            T.ToTensor(),
+            T.RandomApply([ # Randomly apply transformations to some images
+                T.RandomChoice([
+                    T.RandomAffine(degrees=0, translate=(0.10, 0.10), fill=0), # Slight rotation of pixels
+                    T.RandomErasing(p=1.0, scale=(0.0204, 0.0205), ratio=(1.0, 1.0), value=0.0), # Small parts of images, 4*4 are removed
+                ])
+            ], p=0.167),
         ])
     elif mode == 'eval': # deterministic transforms only
         tfs = torchvision.transforms.Compose([
@@ -122,19 +156,47 @@ def main():
     # or modify this as needed to add cross-validation, hyperparameter tuning, etc.
     fashion_mnist = load_training_data()
 
-    # TODO: create data splits
+    # Finding the best combination of batch size and learning rate from a pre-determined list
+    search_configs = [
+        {'batch_size': 32, 'learning_rate': 0.01},
+        {'batch_size': 32, 'learning_rate': 0.001},
+        {'batch_size': 32, 'learning_rate': 0.002},
+        {'batch_size': 64, 'learning_rate': 0.01},
+        {'batch_size': 64, 'learning_rate': 0.001},
+        {'batch_size': 64, 'learning_rate': 0.002},
+    ]
 
-    # TODO: implement hyperparameter search
+    best_overall_acc = -1.0
+    best_model_weights = None
+    best_config = None
 
-    # Train model 
-    # TODO: this may be done within a loop for hyperparameter search / cross-validation
-    model_weights = train_fashion_model(fashion_mnist, n_epochs=1, seed=0)
+    for cfg in search_configs:
+        print(f"\n=== Testing {cfg} ===")
+        weights, _, _, val_accuracies = train_fashion_model(
+            fashion_mnist,
+            n_epochs=30,
+            batch_size=cfg['batch_size'],
+            learning_rate=cfg['learning_rate'],
+            USE_GPU=True,
+            seed=11,
+            return_state_dict_only=False,
+        )
+        peak_acc = max(val_accuracies)
+        best_epoch = val_accuracies.index(peak_acc) + 1
+        print(f"--> Result for {cfg}: Best Val Acc = {peak_acc:.4f} (at epoch {best_epoch})")
 
-    # Save model weights
-    # However you tune and evaluate your model, make sure to save the final weights 
-    # to submission/model_weights.pth before submission!
+        if peak_acc > best_overall_acc:
+            best_overall_acc = peak_acc
+            best_model_weights = weights
+            best_config = {**cfg, 'best_epoch': best_epoch}
+
+    print(f"\nWinning Config: {best_config} | Best Val Acc: {best_overall_acc:.4f}")
+
+    # Save the best model weights across all searched configs
+    os.makedirs('submission', exist_ok=True)
     model_save_path = os.path.join('submission', 'model_weights.pth')
-    torch.save(model_weights, f=model_save_path)
+    torch.save(best_model_weights, f=model_save_path)
+    print(f"Saved final weights to {model_save_path}")
 
 
 if __name__ == "__main__":
